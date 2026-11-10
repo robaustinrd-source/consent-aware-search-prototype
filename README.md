@@ -1,61 +1,55 @@
-# Local-First Agent Search
+# Local-first search prototype
 
-A small, offline-first search service for a person's own local documents and datasets. It provides a local HTTP API, JSON-lines CLI bridge, profile preferences, and an MCP-compatible stdio tool server. It does not crawl private databases or search people by name.
+This project is a local-first, consent-aware search prototype for offline AI agents and trusted local users. It is intentionally narrow and bounded by design.
 
-## Terminal setup
+## What was added in this increment
 
-Requires Python 3.10+.
+- local connector registry and provider capability scaffolding
+- webhook event manager for async notifications
+- extension registry and sandbox layer stubs
+- local auth/session helper scaffold
+- OCR processing scaffold for image/PDF workflows
+- multilingual detection and normalization helpers
+- README documentation for architecture and safety boundaries
+
+## Current support level
+
+- local document indexing
+- local storage and audit log
+- consent-scoped private access
+- agent/CLI interfaces
+- terminal-only hosting on localhost
+- provider capability discovery, not live network integration
+- extension and webhook infrastructure scaffolding, not public execution
+
+## Important boundaries
+
+These features are purposely not a universal search engine over all sectors and pipelines.
+
+- Google, Bing, Yahoo, DuckDuckGo, Firefox, Tor/onion, and private-provider integrations are not live. They are represented as allowlisted provider scaffolds only.
+- Webhooks do not send to arbitrary endpoints until destination validation, signing, retries, and secret rotation are designed.
+- Extensions are not executed in production; they are sandbox stubs only.
+- OCR and multilingual pipelines are placeholders. Real implementations require vendor-specific tooling and user-approved workflows.
+- This does not search people or institutions without explicit authorization and legal/provider support.
+
+## Next recommended implementation path
+
+1. Real auth provider integration (OIDC or equivalent)
+2. UI and settings page
+3. connector adapters behind allowlists and API-key checks
+4. sandboxed extension runtime
+5. OCR pipeline + multilingual indexing
+6. production webhooks and job queue
+7. full audit, retention, and deletion workflows
+
+## Run locally
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m app.cli serve
+export SEARCH_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python -m app.cli serve --host 127.0.0.1 --port 8000
 ```
 
-The server listens only on `127.0.0.1`. On first launch it generates and prints a local admin token; save it in your shell environment before using indexing or settings commands:
-
-```bash
-export SEARCH_API_TOKEN='paste-the-generated-token-here'
-```
-
-The token is not persisted by the application. To choose your own, set `SEARCH_API_TOKEN` before starting the server. Do not bind to a public interface or expose it through a tunnel. Admin endpoints are disabled if no token is configured when the app starts.
-
-## Terminal commands
-
-```bash
-python -m app.cli search "consent workflow"
-python -m app.cli collections
-python -m app.cli interactive
-```
-
-Put supported files under `./data/ingest/` (or set `SEARCH_INGEST_DIR`). Index one file or asynchronously sync the directory:
-
-```bash
-python -m app.cli index ./data/ingest/notes.md --collection default
-python -m app.cli sync --collection default --concurrency 4
-```
-
-`sync` uses async HTTP requests with bounded concurrency and retries transient failures. It does not execute shell commands or arbitrary file contents. Concurrency is capped at eight. The CLI only connects to a loopback API URL and the server refuses non-loopback bind addresses.
-
-## API and data
-
-SQLite persists the local index and audit log. Ingest is limited to UTF-8 TXT, Markdown, JSON, CSV, HTML, and XML under the configured size limit. API paths must remain inside the ingest directory. `POST /search` searches local indexed documents. `GET /connectors` reports provider status; Google, Bing, Yahoo, DuckDuckGo, Firefox, onion services, and private providers are not connected in this prototype.
-
-## Private local collections
-
-Private documents are excluded from normal search and agent tools. A local owner can create a scoped grant via `POST /access-grants`, then use its `grant_id` and exact purpose in `POST /search`. A grant applies to one collection and one source and can be revoked. These controls do not establish another person's identity or substitute for legal consent/provider authorization.
-
-## Offline agents
-
-JSON-lines bridge: `python -m app.agent_server`; MCP-compatible stdio: `python -m app.mcp_server`. Both expose only non-private local content and make no network calls. Configure only in a trusted agent runtime.
-
-## Tests
-
-```bash
-python -m unittest discover -s tests
-```
-
-## Limitations
-
-This remains a prototype, not a production hosting setup. It has no TLS, multi-user authentication, external search connectors, webhooks, executable extensions, web UI, OCR, archive parsing, or production consent verification. Keep it on a trusted local machine. Review [AUDIT.md](AUDIT.md) before indexing sensitive files.
+Then use the CLI or API as documented in the project docs.
