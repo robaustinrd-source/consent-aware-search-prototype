@@ -1,0 +1,3 @@
+Name: Example User
+Role: Researcher
+Preference: Reliable local search and transparent consent logs.
