@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SearchRequest(BaseModel):
@@ -33,3 +33,12 @@ class RevokeGrantPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     authorization_id: str = Field(..., min_length=1, max_length=100)
 
+
+class ProfilePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile_id: str = Field(..., min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9_-]+$")
+    display_name: str = Field(default="Local user", min_length=1, max_length=100)
+    locale: str = Field(default="en", min_length=2, max_length=35)
+    languages: List[str] = Field(default_factory=lambda: ["en"], max_length=20)
+    default_collections: List[str] = Field(default_factory=list, max_length=50)
+    result_format: str = Field(default="json", pattern=r"^(json|html|text)$")

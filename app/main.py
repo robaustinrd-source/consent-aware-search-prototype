@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import os
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -10,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import config
 from .consent import ConsentManager
 from .indexer import LocalIndexer
-from .models import IndexFilePayload, LocalAccessGrantPayload, RevokeGrantPayload, SearchRequest
+from .models import (IndexFilePayload, LocalAccessGrantPayload, ProfilePayload,
+                     RevokeGrantPayload, SearchRequest)
 from .search_engine import LocalSearchEngine
 from .storage import SQLiteStore
 
@@ -20,9 +20,8 @@ engine = LocalSearchEngine(store)
 consent = ConsentManager(store)
 indexer = LocalIndexer(config.INGEST_DIR, config.MAX_FILE_BYTES)
 
-app = FastAPI(title="Local-First Agent Search", version="0.2.0",
-              description="Local document search with scoped, audited access controls.")
-# Browser access is same-origin only by default. Configure a frontend proxy rather than wildcard CORS.
+app = FastAPI(title="Local-First Agent Search", version="0.3.0",
+              description="Local search, profiles, and source-scoped access controls.")
 app.add_middleware(CORSMiddleware, allow_origins=[], allow_credentials=False,
                    allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
 
@@ -47,6 +46,40 @@ def list_collections() -> dict[str, list[str]]:
     return {"collections": engine.list_collections()}
 
 
+@app.get("/connectors")
+def list_connectors() -> dict[str, Any]:
+    # Discovery only: these providers are not queried until an approved API adapter is implemented/configured.
+    return {"connectors": [
+        {"id": "local", "status": "active", "network": False},
+        {"id": "google", "status": "not_configured", "network": True, "integration": "official API only"},
+        {"id": "bing", "status": "not_configured", "network": True, "integration": "official API only"},
+        {"id": "duckduckgo", "status": "not_configured", "network": True, "integration": "approved interface only"},
+        {"id": "yahoo", "status": "not_configured", "network": True, "integration": "approved interface only"},
+        {"id": "firefox", "status": "not_configured", "network": False, "integration": "browser extension/API required"},
+        {"id": "onion", "status": "disabled", "network": True, "integration": "not implemented"},
+        {"id": "private_dataset", "status": "local_only", "network": False, "integration": "owner-managed import"},
+    ]}
+
+
+@app.get("/profiles/{profile_id}")
+def get_profile(profile_id: str, actor: str = Depends(require_local_admin)) -> dict[str, Any]:
+    profile = store.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"profile": profile}
+
+
+@app.post("/profiles")
+def save_profile(payload: ProfilePayload, actor: str = Depends(require_local_admin)) -> dict[str, Any]:
+    unknown = set(payload.default_collections) - set(engine.list_collections())
+    if unknown:
+        raise HTTPException(status_code=400, detail="Default collections must already exist")
+    profile = store.save_profile(**payload.model_dump())
+    store.audit("profile_saved", actor, {"profile_id": payload.profile_id, "locale": payload.locale,
+                "languages": payload.languages, "collection_count": len(payload.default_collections)})
+    return {"profile": profile}
+
+
 @app.post("/index")
 def index_document(payload: IndexFilePayload, actor: str = Depends(require_local_admin)) -> dict[str, Any]:
     try:
@@ -67,6 +100,7 @@ def index_document(payload: IndexFilePayload, actor: str = Depends(require_local
 @app.post("/search")
 def search_documents(payload: SearchRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     allowed_collection = None
+    allowed_source = None
     actor = "anonymous-local"
     if payload.authorization_id:
         actor = require_local_admin(authorization)
@@ -76,14 +110,15 @@ def search_documents(payload: SearchRequest, authorization: str | None = Header(
         if not grant:
             store.audit("private_search_denied", actor, {"authorization_id": payload.authorization_id})
             raise HTTPException(status_code=403, detail="Authorization is invalid, expired, revoked, or purpose-mismatched")
-        allowed_collection = grant["collection_id"]
+        allowed_collection, allowed_source = grant["collection_id"], grant["source_id"]
         if payload.collections and allowed_collection not in payload.collections:
             raise HTTPException(status_code=403, detail="Authorization does not cover requested collection")
     elif payload.purpose:
         raise HTTPException(status_code=400, detail="purpose requires authorization_id")
 
     results = engine.search(query=payload.query, collections=payload.collections or None,
-                            authorized_collection=allowed_collection, limit=payload.limit)
+                            authorized_collection=allowed_collection, authorized_source=allowed_source,
+                            limit=payload.limit)
     store.audit("search_completed", actor, {"query_length": len(payload.query),
                 "collections": payload.collections, "result_count": len(results),
                 "private_access": bool(allowed_collection)})

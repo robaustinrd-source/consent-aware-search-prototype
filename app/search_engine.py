@@ -3,13 +3,13 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from .storage import SQLiteStore
 
 
 class LocalSearchEngine:
-    """Persistent, local lexical search. Private documents are hidden unless scoped access is granted."""
+    """Persistent local search. Private documents require collection AND source scoped access."""
 
     def __init__(self, store: SQLiteStore) -> None:
         self.store = store
@@ -22,27 +22,35 @@ class LocalSearchEngine:
     def list_collections(self) -> List[str]:
         return self.store.list_collections()
 
-    def get_document(self, document_id: str, *, allowed_private_collection: str | None = None) -> Dict[str, Any] | None:
+    def get_document(self, document_id: str, *, allowed_private_collection: str | None = None,
+                     allowed_private_source: str | None = None) -> Dict[str, Any] | None:
         doc = self.store.get_document(document_id)
-        if doc and doc["is_private"] and doc["collection_id"] != allowed_private_collection:
+        if doc and doc["is_private"] and not (
+            doc["collection_id"] == allowed_private_collection
+            and doc["source_id"] == allowed_private_source
+        ):
             return None
         if doc:
             doc.pop("content_hash", None)
         return doc
 
     def search(self, *, query: str, collections: Optional[List[str]] = None,
-               authorized_collection: str | None = None, limit: int = 20) -> List[Dict[str, Any]]:
+               authorized_collection: str | None = None, authorized_source: str | None = None,
+               limit: int = 20) -> List[Dict[str, Any]]:
         terms = self._tokenize(query)
         if not terms:
             return []
         docs = self.store.documents(collections)
-        visible = [d for d in docs if not d["is_private"] or d["collection_id"] == authorized_collection]
+        visible = [d for d in docs if not d["is_private"] or (
+            d["collection_id"] == authorized_collection and d["source_id"] == authorized_source
+        )]
         if not visible:
             return []
         doc_tokens = [self._tokenize(d["text"]) for d in visible]
         avgdl = sum(len(tokens) for tokens in doc_tokens) / max(1, len(doc_tokens))
         n = len(visible)
-        df = Counter(term for term in set(terms) for tokens in doc_tokens if term in set(tokens))
+        unique_tokens = [set(tokens) for tokens in doc_tokens]
+        df = Counter(term for term in set(terms) for tokens in unique_tokens if term in tokens)
         results = []
         for doc, tokens in zip(visible, doc_tokens):
             frequencies = Counter(tokens)
@@ -55,10 +63,9 @@ class LocalSearchEngine:
                     score += idf * frequency * 2.2 / denominator
             if score <= 0:
                 continue
-            snippet = self._snippet(doc["text"], terms)
             results.append({"document_id": doc["document_id"], "title": doc["title"],
                             "collection_id": doc["collection_id"], "source_id": doc["source_id"],
-                            "score": round(score, 5), "snippet": snippet,
+                            "score": round(score, 5), "snippet": self._snippet(doc["text"], terms),
                             "is_private": bool(doc["is_private"])})
         return sorted(results, key=lambda item: item["score"], reverse=True)[:max(1, min(limit, 100))]
 

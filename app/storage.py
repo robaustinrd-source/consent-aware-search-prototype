@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 
 class SQLiteStore:
-    """Small durable local store. Keep the database on a trusted local disk."""
+    """Small durable local store. Keep the database on trusted local disk."""
 
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -54,6 +55,15 @@ class SQLiteStore:
                     actor TEXT NOT NULL,
                     details_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS profiles (
+                    profile_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    locale TEXT NOT NULL,
+                    languages_json TEXT NOT NULL,
+                    default_collections_json TEXT NOT NULL,
+                    result_format TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
             """)
 
@@ -125,6 +135,32 @@ class SQLiteStore:
             cursor = db.execute("UPDATE access_grants SET revoked_at=? WHERE grant_id=? AND revoked_at IS NULL",
                                 (datetime.now(timezone.utc).isoformat(), grant_id))
         return cursor.rowcount > 0
+
+    def save_profile(self, *, profile_id: str, display_name: str, locale: str,
+                     languages: List[str], default_collections: List[str], result_format: str) -> Dict[str, Any]:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        record = {"profile_id": profile_id, "display_name": display_name, "locale": locale,
+                  "languages": languages, "default_collections": default_collections,
+                  "result_format": result_format, "updated_at": updated_at}
+        with self.connect() as db:
+            db.execute("""INSERT INTO profiles VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(profile_id) DO UPDATE SET display_name=excluded.display_name,
+                locale=excluded.locale,languages_json=excluded.languages_json,
+                default_collections_json=excluded.default_collections_json,
+                result_format=excluded.result_format,updated_at=excluded.updated_at""",
+                (profile_id, display_name, locale, json.dumps(languages),
+                 json.dumps(default_collections), result_format, updated_at))
+        return record
+
+    def get_profile(self, profile_id: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM profiles WHERE profile_id=?", (profile_id,)).fetchone()
+        if not row:
+            return None
+        record = dict(row)
+        record["languages"] = json.loads(record.pop("languages_json"))
+        record["default_collections"] = json.loads(record.pop("default_collections_json"))
+        return record
 
     def audit(self, event_type: str, actor: str, details: Dict[str, Any]) -> None:
         with self.connect() as db:
