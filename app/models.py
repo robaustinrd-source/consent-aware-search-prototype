@@ -1,58 +1,35 @@
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
 from typing import List, Optional
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=1)
-    collections: List[str] = Field(default_factory=list)
-    include_private: bool = False
-    language: Optional[str] = None
-
-
-class SearchResult(BaseModel):
-    document_id: str
-    title: str
-    collection_id: str
-    source_id: str
-    score: float
-    snippet: str
-    consent_required: bool = False
-
-
-class ConsentRequestPayload(BaseModel):
-    subject_id: str
-    source_id: str
-    purpose: str
-    requested_by: str
-    expires_in_hours: int = 24
-
-
-class ConsentApprovePayload(BaseModel):
-    request_id: str
-    approved_by: str
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(..., min_length=1, max_length=1000)
+    collections: List[str] = Field(default_factory=list, max_length=50)
+    limit: int = Field(default=20, ge=1, le=100)
+    authorization_id: Optional[str] = None
+    purpose: Optional[str] = Field(default=None, max_length=200)
 
 
 class IndexFilePayload(BaseModel):
-    path: str
-    collection_id: str = "default"
-    source_id: str = "local-default"
-    consent_required: bool = False
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(..., min_length=1, max_length=500)
+    collection_id: str = Field(default="default", min_length=1, max_length=100)
+    source_id: str = Field(default="local-default", min_length=1, max_length=100)
+    is_private: bool = False
 
 
-class ConsentRequestRecord(BaseModel):
-    request_id: str
-    subject_id: str
-    source_id: str
-    purpose: str
-    requested_by: str
-    status: str = "pending"
-    expires_in_hours: int = 24
-    approved_by: Optional[str] = None
+class LocalAccessGrantPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: str = Field(..., min_length=1, max_length=100)
+    collection_id: str = Field(..., min_length=1, max_length=100)
+    purpose: str = Field(..., min_length=3, max_length=200)
+    expires_in_hours: int = Field(default=24, ge=1, le=720)
 
 
-class SourceConfig(BaseModel):
-    id: str
-    name: str
-    kind: str = "local"
-    consent_required: bool = False
-    enabled: bool = True
+class RevokeGrantPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    authorization_id: str = Field(..., min_length=1, max_length=100)
+

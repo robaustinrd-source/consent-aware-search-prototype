@@ -4,12 +4,12 @@ import json
 import re
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List
 
 
 class _HTMLTextExtractor(HTMLParser):
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(convert_charrefs=True)
         self.parts: List[str] = []
 
     def handle_data(self, data: str) -> None:
@@ -18,36 +18,40 @@ class _HTMLTextExtractor(HTMLParser):
 
 
 class LocalIndexer:
-    def __init__(self) -> None:
-        self.supported_suffixes = {".txt", ".md", ".json", ".csv", ".html", ".htm"}
+    """Read small, non-executable text formats strictly from a configured root."""
+    supported_suffixes = {".txt", ".md", ".json", ".csv", ".html", ".htm", ".xml"}
 
-    def read_file(self, file_path: str) -> str:
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(file_path)
+    def __init__(self, allowed_root: Path, max_bytes: int = 10 * 1024 * 1024) -> None:
+        self.allowed_root = allowed_root.expanduser().resolve()
+        self.max_bytes = max_bytes
+        self.allowed_root.mkdir(parents=True, exist_ok=True)
 
-        text = path.read_text(encoding="utf-8", errors="ignore")
+    def read_file(self, relative_path: str) -> str:
+        candidate = Path(relative_path)
+        if candidate.is_absolute():
+            raise ValueError("only paths relative to the configured ingest directory are allowed")
+        path = (self.allowed_root / candidate).resolve(strict=True)
+        if not path.is_relative_to(self.allowed_root):
+            raise ValueError("path is outside the configured ingest directory")
+        if not path.is_file():
+            raise ValueError("path must refer to a regular file")
+        if path.suffix.lower() not in self.supported_suffixes:
+            raise ValueError("unsupported file type")
+        if path.stat().st_size > self.max_bytes:
+            raise ValueError("file exceeds configured size limit")
+        raw = path.read_text(encoding="utf-8", errors="replace")
         suffix = path.suffix.lower()
-
-        if suffix in {".html", ".htm"}:
-            return self._extract_html_text(text)
-        if suffix == ".json":
+        if suffix in {".html", ".htm", ".xml"}:
+            parser = _HTMLTextExtractor()
+            parser.feed(raw)
+            raw = " ".join(parser.parts)
+        elif suffix == ".json":
             try:
-                payload = json.loads(text)
-                return json.dumps(payload, ensure_ascii=False)
+                raw = json.dumps(json.loads(raw), ensure_ascii=False)
             except json.JSONDecodeError:
-                return text
-        if suffix == ".csv":
-            return text
-        return text
-
-    def _extract_html_text(self, html: str) -> str:
-        parser = _HTMLTextExtractor()
-        parser.feed(html)
-        return " ".join(parser.parts)
+                pass
+        return self.normalize_text(raw)
 
     @staticmethod
     def normalize_text(text: str) -> str:
-        text = text.replace("\r", " ")
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
+        return re.sub(r"\s+", " ", text.replace("\r", " ")).strip()

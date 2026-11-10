@@ -1,122 +1,86 @@
-# Consent-Aware Local Search Prototype
+# Local-First Agent Search
 
-A local-first, consent-aware search and indexing system designed for offline AI agents and human users.
+A small, offline-first search service for a person's own local documents and datasets. It provides a local HTTP API, a JSON-lines CLI bridge, and an MCP-compatible stdio tool server. It does not crawl private databases or search people by name.
 
-This prototype is intentionally narrow and safe:
-- local collections are searchable without cloud access
-- public sources can be queried only when configured
-- private or sensitive sources require consent
-- source access is auditable and revocable
-- agent interfaces use a small, explicit tool surface
+## Current prototype features
 
-## What is included
+- Persistent SQLite index and audit log
+- Text/Markdown/JSON/CSV/HTML/XML ingestion from a configured directory
+- Unicode-aware tokenization and BM25-style lexical ranking
+- Private collections hidden by default; optional local-owner grants are scoped by collection, purpose, and expiry
+- Revocable local grants and audit events
+- Read-only agent tools that cannot retrieve private documents or access the network
+- API admin endpoints protected by a bearer token
 
-- FastAPI backend for search and consent APIs
-- local document indexing for text-based files
-- in-memory consent workflow
-- simple offline agent bridge withstdio-friendly tool calls
-- sample collection for testing
-- minimal file layout ready for extension
+## Run locally
 
-## Safety posture
-
-This project does not build a universal private data search engine. Instead, it creates a safe pattern:
-- the user owns the data or has permission
-- a source is explicitly allowed
-- consent is captured before sensitive access
-- audit events are generated for each request
-
-## Quickstart
-
-1. Create a virtual environment
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
-
-2. Install dependencies
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Run the API server
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-   ```
-
-4. Explore the API
-   ```bash
-   http://localhost:8000/docs
-   ```
-
-5. Run the CLI demo
-   ```bash
-   python -m app.agent_server --demo
-   ```
-
-## Example requests
-
-### Search local content
+Requires Python 3.10+.
 
 ```bash
-curl -X POST http://localhost:8000/search \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "consent workflow",
-    "collections": ["default"],
-    "include_private": false
-  }'
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export SEARCH_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-### Create a consent request
+The API binds to localhost. Do not bind it to a public interface or expose it through a tunnel. Admin endpoints are disabled unless `SEARCH_API_TOKEN` is configured. Put files to index under `./data/ingest/`; API paths must be relative to that directory. The ingest service rejects unsupported types, paths outside the root, and files over the configured size.
 
 ```bash
-curl -X POST http://localhost:8000/consent/request \
+cp sampledocs/knowledge.md data/ingest/
+curl -X POST http://127.0.0.1:8000/index \
+  -H "Authorization: Bearer $SEARCH_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"path":"knowledge.md","collection_id":"default","source_id":"local-files"}'
+curl -X POST http://127.0.0.1:8000/search \
   -H "Content-Type: application/json" \
-  -d '{
-    "subject_id": "person-001",
-    "source_id": "source-1",
-    "purpose": "background review",
-    "requested_by": "agent-01"
-  }'
+  -d '{"query":"consent workflow","collections":["default"]}'
 ```
 
-### Approve a consent request
+## Private local collections
+
+Mark documents private when indexing. They are excluded from normal search and agent tools. A local owner can create a purpose-limited grant using the admin token:
 
 ```bash
-curl -X POST http://localhost:8000/consent/approve \
-  -H "Content-Type: application/json" \
-  -d '{
-    "request_id": "request-uuid",
-    "approved_by": "human-owner"
-  }'
+curl -X POST http://127.0.0.1:8000/access-grants \
+  -H "Authorization: Bearer $SEARCH_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"source_id":"local-files","collection_id":"private","purpose":"review my own files","expires_in_hours":2}'
 ```
 
-## Folder layout
+Use the returned `authorization.grant_id` and the exact purpose to search that collection:
 
-```text
-app/
-  __init__.py
-  agent_server.py
-  consent.py
-  indexer.py
-  main.py
-  models.py
-  search_engine.py
-sampledocs/
-  knowledge.md
-  profile.txt
+```bash
+curl -X POST http://127.0.0.1:8000/search \
+  -H "Authorization: Bearer $SEARCH_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"query":"account","collections":["private"],"authorization_id":"grant-id","purpose":"review my own files"}'
 ```
 
-## Future extensions
+Revoke via `POST /access-grants/revoke` with `{"authorization_id":"grant-id"}`. These local grants are an application access-control feature only: they do not prove a person's identity, establish legal consent, or authorize access to third-party providers. Do not use this prototype for employment, credit, health, government, or other consequential checks.
 
-- source adapters for Bing, DuckDuckGo, Yahoo, private datasets
-- webhook emitters for search completion or consent activity
-- extension security sandbox
-- local language model integration
-- stronger persistence and multi-user auth
-- MCP protocol adapters for wider AI agent compatibility
+## Offline agents
 
-## License
+JSON-lines CLI:
 
-MIT
+```bash
+python -m app.agent_server --demo
+python -m app.agent_server
+```
+
+The line-oriented bridge accepts `{"action":"list_collections"}`, `{"action":"search_local","query":"..."}`, and `{"action":"get_document","document_id":"..."}`. It exposes non-private local data only.
+
+MCP-compatible stdio server:
+
+```bash
+python -m app.mcp_server
+```
+
+It implements initialize, tools/list, and tools/call for `list_collections`, `search_local`, and `get_document`. It uses the same local SQLite index and never makes network calls. Configure it only in an agent you trust; local agent processes can read non-private indexed content.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+## Deliberate boundaries and next steps
+
+This is a prototype, not a production security or legal-consent system. It currently has no external search connectors, cloud sync, webhook delivery, extension execution, authentication for multiple users, OCR, or support for arbitrary file formats. Integrate external providers only through their approved APIs and terms; keep connectors opt-in, separately permissioned, and auditable. Any future extension runtime should be sandboxed rather than importing arbitrary plugins into the API process.

@@ -1,115 +1,74 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
-from uuid import uuid4
+import re
+from collections import Counter
+from typing import Any, Dict, List, Optional, Set
+
+from .storage import SQLiteStore
 
 
 class LocalSearchEngine:
-    def __init__(self) -> None:
-        self.documents: Dict[str, Dict[str, object]] = {}
-        self.collection_map: Dict[str, Set[str]] = defaultdict(set)
+    """Persistent, local lexical search. Private documents are hidden unless scoped access is granted."""
 
-    def index_document(
-        self,
-        *,
-        title: str,
-        text: str,
-        collection_id: str,
-        source_id: str,
-        consent_required: bool = False,
-    ) -> Dict[str, object]:
-        doc_id = f"doc-{uuid4().hex[:10]}"
-        normalized = self._normalize(text)
-        doc = {
-            "document_id": doc_id,
-            "title": title,
-            "text": normalized,
-            "collection_id": collection_id,
-            "source_id": source_id,
-            "consent_required": consent_required,
-            "token_count": len(normalized.split()),
-        }
-        self.documents[doc_id] = doc
-        self.collection_map[collection_id].add(doc_id)
+    def __init__(self, store: SQLiteStore) -> None:
+        self.store = store
+
+    def index_document(self, *, title: str, text: str, collection_id: str,
+                       source_id: str, is_private: bool = False) -> Dict[str, Any]:
+        return self.store.save_document(title=title, text=text, collection_id=collection_id,
+                                        source_id=source_id, is_private=is_private)
+
+    def list_collections(self) -> List[str]:
+        return self.store.list_collections()
+
+    def get_document(self, document_id: str, *, allowed_private_collection: str | None = None) -> Dict[str, Any] | None:
+        doc = self.store.get_document(document_id)
+        if doc and doc["is_private"] and doc["collection_id"] != allowed_private_collection:
+            return None
+        if doc:
+            doc.pop("content_hash", None)
         return doc
 
-    def search(
-        self,
-        *,
-        query: str,
-        collections: Optional[List[str]] = None,
-        include_private: bool = False,
-        language: Optional[str] = None,
-    ) -> List[Dict[str, object]]:
-        if not query:
+    def search(self, *, query: str, collections: Optional[List[str]] = None,
+               authorized_collection: str | None = None, limit: int = 20) -> List[Dict[str, Any]]:
+        terms = self._tokenize(query)
+        if not terms:
             return []
-
-        query_terms = self._tokenize(query)
-        collection_ids = set(collections or self.collection_map.keys())
-
-        results: List[Dict[str, object]] = []
-        for doc_id, doc in self.documents.items():
-            if doc["collection_id"] not in collection_ids:
-                continue
-            if bool(doc["consent_required"]) and not include_private:
-                continue
-
-            score = self._score_document(doc["text"], query_terms)
+        docs = self.store.documents(collections)
+        visible = [d for d in docs if not d["is_private"] or d["collection_id"] == authorized_collection]
+        if not visible:
+            return []
+        doc_tokens = [self._tokenize(d["text"]) for d in visible]
+        avgdl = sum(len(tokens) for tokens in doc_tokens) / max(1, len(doc_tokens))
+        n = len(visible)
+        df = Counter(term for term in set(terms) for tokens in doc_tokens if term in set(tokens))
+        results = []
+        for doc, tokens in zip(visible, doc_tokens):
+            frequencies = Counter(tokens)
+            score = 0.0
+            for term in terms:
+                frequency = frequencies[term]
+                if frequency:
+                    idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
+                    denominator = frequency + 1.2 * (1 - 0.75 + 0.75 * len(tokens) / max(avgdl, 1))
+                    score += idf * frequency * 2.2 / denominator
             if score <= 0:
                 continue
-
-            snippet = self._make_snippet(doc["text"], query_terms)
-            results.append(
-                {
-                    "document_id": doc["document_id"],
-                    "title": doc["title"],
-                    "collection_id": doc["collection_id"],
-                    "source_id": doc["source_id"],
-                    "score": round(score, 4),
-                    "snippet": snippet,
-                    "consent_required": bool(doc["consent_required"]),
-                }
-            )
-
-        return sorted(results, key=lambda item: item["score"], reverse=True)
-
-    @staticmethod
-    def _normalize(text: str) -> str:
-        normalized = text.lower().replace("\n", " ")
-        return " ".join(normalized.split())
+            snippet = self._snippet(doc["text"], terms)
+            results.append({"document_id": doc["document_id"], "title": doc["title"],
+                            "collection_id": doc["collection_id"], "source_id": doc["source_id"],
+                            "score": round(score, 5), "snippet": snippet,
+                            "is_private": bool(doc["is_private"])})
+        return sorted(results, key=lambda item: item["score"], reverse=True)[:max(1, min(limit, 100))]
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
-        return [token for token in text.lower().split() if token]
+        return re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
 
     @staticmethod
-    def _score_document(document_text: str, query_terms: List[str]) -> float:
-        tokens = LocalSearchEngine._tokenize(document_text)
-        if not tokens:
-            return 0.0
-        document_freq = defaultdict(int)
-        for token in tokens:
-            document_freq[token] += 1
-        score = 0.0
-        for term in query_terms:
-            if term in document_freq:
-                score += document_freq[term]
-        if query_terms:
-            score += 0.1 * len(set(query_terms) & set(tokens))
-        return score
-
-    @staticmethod
-    def _make_snippet(text: str, query_terms: List[str]) -> str:
-        lower = text.lower()
-        hits: List[str] = []
-        for term in query_terms:
-            idx = lower.find(term)
-            if idx >= 0:
-                start = max(0, idx - 40)
-                end = min(len(text), idx + 80)
-                hits.append(text[start:end].strip())
-        if hits:
-            return "... " + " ... ".join(hits) + " ..."
-        return text[:160]
+    def _snippet(text: str, terms: List[str]) -> str:
+        folded = text.casefold()
+        position = min((folded.find(term.casefold()) for term in terms if folded.find(term.casefold()) >= 0), default=0)
+        start, end = max(0, position - 70), min(len(text), position + 180)
+        return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
